@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs';
-import jwt, { SignOptions } from 'jsonwebtoken';
+import jwt from 'jsonwebtoken';
 import { PrismaClient } from '@prisma/client';
 import { config } from '../../config';
 import { UnauthorizedError, ConflictError, BadRequestError } from '../../shared/errors';
@@ -8,23 +8,32 @@ import { RegisterInput, LoginInput, ChangePasswordInput } from './auth.schema';
 
 const prisma = new PrismaClient();
 
+// Convert time string to seconds
+function parseExpiry(expiry: string): number {
+  const match = expiry.match(/^(\d+)([smhd])$/);
+  if (!match) return 86400; // default 24h
+  const value = parseInt(match[1], 10);
+  const unit = match[2];
+  switch (unit) {
+    case 's': return value;
+    case 'm': return value * 60;
+    case 'h': return value * 3600;
+    case 'd': return value * 86400;
+    default: return 86400;
+  }
+}
+
 export class AuthService {
   // Generate JWT tokens
   private generateTokens(payload: ITokenPayload): IAuthTokens {
-    const accessTokenOptions: SignOptions = {
-      expiresIn: config.jwt.expiresIn as string,
-    };
-
-    const refreshTokenOptions: SignOptions = {
-      expiresIn: config.jwt.refreshExpiresIn as string,
-    };
-
-    const accessToken = jwt.sign(payload, config.jwt.secret, accessTokenOptions);
+    const accessToken = jwt.sign(payload, config.jwt.secret, {
+      expiresIn: parseExpiry(config.jwt.expiresIn),
+    });
 
     const refreshToken = jwt.sign(
       { userId: payload.userId, type: 'refresh' },
       config.jwt.secret,
-      refreshTokenOptions
+      { expiresIn: parseExpiry(config.jwt.refreshExpiresIn) }
     );
 
     return { accessToken, refreshToken };
