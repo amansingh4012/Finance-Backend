@@ -16,6 +16,12 @@
 - [Overview](#-overview)
 - [Tech Stack](#-tech-stack)
 - [Architecture & Project Structure](#-architecture--project-structure)
+- [System Architecture Overview](#-system-architecture-overview)
+- [Request Lifecycle & System Flows](#-request-lifecycle--system-flows)
+  - [Authentication Flow](#authentication-flow-1)
+  - [Role-Based Access Control Flow](#role-based-access-control-flow)
+  - [Financial Record Creation Flow](#financial-record-creation-flow)
+  - [Dashboard Summary Generation Flow](#dashboard-summary-generation-flow)
 - [Data Models](#-data-models)
 - [Role & Access Control Design](#-role--access-control-design)
 - [API Reference](#-api-reference)
@@ -118,6 +124,527 @@ src/
 | **Services** | Business logic, validation rules, database operations via Prisma |
 | **Middlewares** | Cross-cutting concerns (auth, validation, error handling) |
 | **Shared** | Reusable types, utilities, and error classes |
+
+---
+
+## 🔷 System Architecture Overview
+
+This backend follows a **layered architecture pattern** with clear separation between HTTP handling, business logic, and data persistence. Each layer has a single responsibility, enabling independent testing, easier maintenance, and horizontal scaling.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CLIENT LAYER                                 │
+│         (Postman / Frontend App / REST API Consumer)            │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ HTTP Request (JSON)
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    SERVER ENTRY POINT                           │
+│                      (server.ts)                                │
+│   • Database connection (Prisma)                                │
+│   • Graceful shutdown handling                                  │
+│   • Server initialization on PORT                               │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    EXPRESS APPLICATION                          │
+│                       (app.ts)                                  │
+│   • Global middleware (helmet, cors, body-parser)               │
+│   • Request ID & logging middleware                             │
+│   • Route mounting (/api/auth, /api/users, etc.)                │
+│   • Swagger documentation (/api/docs)                           │
+│   • 404 & Global error handlers                                 │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    ROUTING LAYER                                │
+│            (modules/*/routes.ts)                                │
+│   • HTTP method mapping (GET, POST, PUT, DELETE)                │
+│   • Middleware chaining per route                               │
+│   • Parameter extraction (params, query, body)                  │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    MIDDLEWARE LAYER                             │
+│                   (middlewares/*.ts)                            │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │    Auth     │  │    RBAC     │  │      Validation         │  │
+│  │ Middleware  │→ │   Guard     │→ │   (Zod Schemas)         │  │
+│  │ (JWT verify)│  │ (permission)│  │ (body/query/params)     │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    CONTROLLER LAYER                             │
+│              (modules/*/controller.ts)                          │
+│   • Extract validated request data                              │
+│   • Invoke service methods                                      │
+│   • Format and send HTTP responses                              │
+│   • Delegate errors to error handler                            │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    SERVICE LAYER                                │
+│               (modules/*/service.ts)                            │
+│   • Business logic implementation                               │
+│   • Data transformation & calculations                          │
+│   • Validation rules enforcement                                │
+│   • Orchestrates database operations                            │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                DATA ACCESS LAYER (ORM)                          │
+│                 (Prisma Client)                                 │
+│   • Type-safe database queries                                  │
+│   • Transaction management                                      │
+│   • Query optimization & indexing                               │
+│   • Soft delete filtering                                       │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    DATABASE                                     │
+│              (PostgreSQL via Neon)                              │
+│   • Tables: User, Record, Category                              │
+│   • Indexes for performance                                     │
+│   • ACID compliance for financial data                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Design Philosophy
+
+The architecture enforces **strict unidirectional data flow** — requests travel downward through layers, and responses bubble up. This prevents circular dependencies and makes the codebase predictable. Each layer only knows about the layer directly below it: controllers call services, services call Prisma, but never the reverse.
+
+**Middleware composition** allows cross-cutting concerns (authentication, authorization, validation) to be applied declaratively at the route level without polluting business logic. A route definition reads like a pipeline: `authenticate → authorize → validate → handle`.
+
+The **modular structure** (auth, users, records, dashboard) enables feature isolation. Each module owns its routes, controller, service, and schemas, making it easy to modify or extend one domain without affecting others. Shared utilities and types live in `/shared`, promoting DRY principles while maintaining module independence.
+
+---
+
+## 🔄 Request Lifecycle & System Flows
+
+This section details how requests flow through the system for key operations. Each flow includes a step-by-step walkthrough and an ASCII diagram showing decision points.
+
+---
+
+### Authentication Flow
+
+**Scenario**: A user submits credentials to `POST /api/auth/login` and receives JWT tokens.
+
+#### Step-by-Step Walkthrough
+
+1. **Client** sends POST request with `{ email, password }` to `/api/auth/login`
+2. **Express Router** matches the route and invokes the middleware chain
+3. **Validation Middleware** validates request body against `loginSchema` (Zod)
+4. **Auth Controller** receives validated data, calls `authService.login()`
+5. **Auth Service** queries database for user by email (case-insensitive)
+6. **Auth Service** verifies user exists, is not deleted, and status is ACTIVE
+7. **Auth Service** compares password hash using `bcrypt.compare()`
+8. **Auth Service** generates JWT access token (24h) and refresh token (7d)
+9. **Auth Controller** formats response with user data (sans password) and tokens
+10. **Client** receives 200 OK with tokens for subsequent authenticated requests
+
+#### Flow Diagram
+
+```
+┌──────────┐     POST /api/auth/login
+│  Client  │     { email, password }
+└────┬─────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│           Express Router             │
+│        (auth.routes.ts)              │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│       Validation Middleware          │
+│    validate(loginSchema, 'body')     │
+└────┬─────────────────────────────────┘
+     │
+     ├─────────────────────────────────────┐
+     │                                     │
+   Valid                              Invalid Input
+     │                                     │
+     ▼                                     ▼
+┌──────────────────────────────────────┐  ┌─────────────────┐
+│         Auth Controller              │  │ 422 Validation  │
+│    authController.login()            │  │     Error       │
+└────┬─────────────────────────────────┘  └─────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│          Auth Service                │
+│     authService.login(data)          │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│         Prisma Client                │
+│  prisma.user.findUnique({ email })   │
+└────┬─────────────────────────────────┘
+     │
+     ├─────────────────────────────────────┐
+     │                                     │
+ User Found                          User Not Found
+     │                                     │
+     ▼                                     ▼
+┌──────────────────────────────────────┐  ┌─────────────────┐
+│    Check: deletedAt, status          │  │ 401 Unauthorized│
+│    bcrypt.compare(password, hash)    │  │ Invalid creds   │
+└────┬─────────────────────────────────┘  └─────────────────┘
+     │
+     ├─────────────────────────────────────┐
+     │                                     │
+Password Valid                       Password Invalid
+     │                                     │
+     ▼                                     ▼
+┌──────────────────────────────────────┐  ┌─────────────────┐
+│      Generate JWT Tokens             │  │ 401 Unauthorized│
+│  accessToken (24h), refreshToken(7d) │  │ Invalid creds   │
+└────┬─────────────────────────────────┘  └─────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│        Response 200 OK               │
+│  { user, tokens: { access, refresh }}│
+└──────────────────────────────────────┘
+```
+
+---
+
+### Role-Based Access Control Flow
+
+**Scenario**: An authenticated user accesses a protected endpoint that requires specific permissions.
+
+#### Step-by-Step Walkthrough
+
+1. **Client** sends request with `Authorization: Bearer <token>` header
+2. **Express Router** matches route, begins middleware chain
+3. **Auth Middleware** extracts token from header, verifies JWT signature
+4. **Auth Middleware** decodes payload `{ userId, email, role }`
+5. **Auth Middleware** queries database to confirm user is active and not deleted
+6. **Auth Middleware** attaches `req.user = { userId, email, role }` to request
+7. **RBAC Middleware** checks if `req.user.role` has required permission(s)
+8. **RBAC Middleware** uses `RolePermissions` mapping to verify access
+9. If authorized: request proceeds to controller → service → database → response
+10. If unauthorized: 403 Forbidden response returned immediately
+
+#### Flow Diagram
+
+```
+┌──────────┐     GET /api/users
+│  Client  │     Authorization: Bearer <JWT>
+└────┬─────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│           Express Router             │
+│        (users.routes.ts)             │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│        Auth Middleware               │
+│       authenticate(req, res, next)   │
+│  • Extract Bearer token              │
+│  • jwt.verify(token, secret)         │
+│  • Decode { userId, email, role }    │
+└────┬─────────────────────────────────┘
+     │
+     ├─────────────────────────────────────────────────────┐
+     │                                                     │
+ Token Valid                                        Token Invalid/Expired
+     │                                                     │
+     ▼                                                     ▼
+┌──────────────────────────────────────┐          ┌─────────────────┐
+│      Query User from Database        │          │ 401 Unauthorized│
+│  prisma.user.findUnique({ userId })  │          │ Invalid token   │
+│  Check: exists, active, not deleted  │          └─────────────────┘
+└────┬─────────────────────────────────┘
+     │
+     ├─────────────────────────────────────────────────────┐
+     │                                                     │
+ User Valid                                          User Invalid
+     │                                                     │
+     ▼                                                     ▼
+┌──────────────────────────────────────┐          ┌─────────────────┐
+│  Attach req.user = { userId, role }  │          │ 401 Unauthorized│
+│          next()                      │          │ Account inactive│
+└────┬─────────────────────────────────┘          └─────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│         RBAC Middleware              │
+│  authorize(Permissions.READ_USERS)   │
+│  • Check: req.user.role              │
+│  • Lookup: RolePermissions[role]     │
+│  • Verify: includes permission?      │
+└────┬─────────────────────────────────┘
+     │
+     ├─────────────────────────────────────────────────────┐
+     │                                                     │
+ Has Permission                                    Missing Permission
+ (ANALYST, ADMIN)                                      (VIEWER)
+     │                                                     │
+     ▼                                                     ▼
+┌──────────────────────────────────────┐          ┌─────────────────┐
+│          Controller                  │          │  403 Forbidden  │
+│   usersController.getAllUsers()      │          │  Access denied  │
+└────┬─────────────────────────────────┘          └─────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│            Service                   │
+│   usersService.getAllUsers(query)    │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│         Prisma Client                │
+│   prisma.user.findMany({ where })    │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│        Response 200 OK               │
+│   { data: users[], pagination }      │
+└──────────────────────────────────────┘
+```
+
+---
+
+### Financial Record Creation Flow
+
+**Scenario**: An Admin user creates a new financial record via `POST /api/records`.
+
+#### Step-by-Step Walkthrough
+
+1. **Client** sends POST request with record data and Bearer token
+2. **Express Router** matches `/api/records` POST route
+3. **Auth Middleware** verifies JWT, attaches `req.user` with role ADMIN
+4. **RBAC Middleware** checks `authorize(Permissions.CREATE_RECORDS)`
+5. **Validation Middleware** validates body against `createRecordSchema`
+6. **Records Controller** extracts validated data, calls service with `userId`
+7. **Records Service** transforms date string to Date object
+8. **Prisma Client** inserts record with proper Decimal handling
+9. **Records Service** converts Decimal to number for response
+10. **Records Controller** returns 201 Created with new record data
+
+#### Flow Diagram
+
+```
+┌──────────┐     POST /api/records
+│  Client  │     Authorization: Bearer <admin-token>
+│ (Admin)  │     { amount, type, category, date, description }
+└────┬─────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│           Express Router             │
+│        (records.routes.ts)           │
+│   router.post('/', authenticate,     │
+│     authorize(CREATE_RECORDS),       │
+│     validate(createRecordSchema),    │
+│     controller.createRecord)         │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│        Auth Middleware               │
+│  • Verify JWT token                  │
+│  • Confirm user active               │
+│  • Attach req.user = { role: ADMIN } │
+└────┬─────────────────────────────────┘
+     │ ✓ Token Valid
+     ▼
+┌──────────────────────────────────────┐
+│         RBAC Middleware              │
+│  authorize(Permissions.CREATE_RECORDS)│
+│  • ADMIN role has CREATE_RECORDS ✓   │
+└────┬─────────────────────────────────┘
+     │ ✓ Permission Granted
+     ▼
+┌──────────────────────────────────────┐
+│       Validation Middleware          │
+│    validate(createRecordSchema)      │
+│  • amount: positive, max 999999999.99│
+│  • type: INCOME | EXPENSE            │
+│  • category: string 1-50 chars       │
+│  • date: valid ISO date string       │
+│  • description: optional, max 500    │
+└────┬─────────────────────────────────┘
+     │
+     ├─────────────────────────────────────┐
+     │                                     │
+   Valid                              Invalid
+     │                                     │
+     ▼                                     ▼
+┌──────────────────────────────────────┐  ┌─────────────────┐
+│        Records Controller            │  │ 422 Validation  │
+│   recordsController.createRecord()   │  │ { details: [] } │
+│   • Extract req.body, req.user.userId│  └─────────────────┘
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│         Records Service              │
+│   recordsService.createRecord()      │
+│   • Parse date string to Date        │
+│   • Attach userId to record          │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│         Prisma Client                │
+│   prisma.record.create({             │
+│     data: {                          │
+│       amount: Decimal,               │
+│       type, category, date,          │
+│       description, userId            │
+│     }                                │
+│   })                                 │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│      Transform & Respond             │
+│   • Convert Decimal → number         │
+│   • Format success response          │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│        Response 201 Created          │
+│   {                                  │
+│     success: true,                   │
+│     data: { id, amount, type, ... }, │
+│     message: "Record created"        │
+│   }                                  │
+└──────────────────────────────────────┘
+```
+
+---
+
+### Dashboard Summary Generation Flow
+
+**Scenario**: A Viewer requests financial summary via `GET /api/dashboard/summary`.
+
+#### Step-by-Step Walkthrough
+
+1. **Client** sends GET request with optional `startDate` and `endDate` query params
+2. **Express Router** matches route, begins middleware chain
+3. **Auth Middleware** verifies JWT, confirms user is active
+4. **RBAC Middleware** checks `authorize(Permissions.READ_DASHBOARD)` — VIEWER has this
+5. **Validation Middleware** validates query params against `dashboardQuerySchema`
+6. **Dashboard Controller** extracts query params, calls service
+7. **Dashboard Service** builds Prisma `where` clause with date filters
+8. **Prisma Client** executes `groupBy` aggregation on records table
+9. **Dashboard Service** calculates totals, net balance, savings rate
+10. **Dashboard Controller** returns formatted summary response
+
+#### Flow Diagram
+
+```
+┌──────────┐     GET /api/dashboard/summary?startDate=2024-01-01&endDate=2024-12-31
+│  Client  │     Authorization: Bearer <viewer-token>
+│ (Viewer) │
+└────┬─────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│           Express Router             │
+│      (dashboard.routes.ts)           │
+│   router.get('/summary',             │
+│     authenticate,                    │
+│     authorize(READ_DASHBOARD),       │
+│     validate(dashboardQuerySchema),  │
+│     controller.getSummary)           │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│        Auth Middleware               │
+│  • Verify JWT, decode payload        │
+│  • req.user = { role: VIEWER }       │
+└────┬─────────────────────────────────┘
+     │ ✓ Valid
+     ▼
+┌──────────────────────────────────────┐
+│         RBAC Middleware              │
+│  authorize(Permissions.READ_DASHBOARD)│
+│  • VIEWER has READ_DASHBOARD ✓       │
+└────┬─────────────────────────────────┘
+     │ ✓ Authorized
+     ▼
+┌──────────────────────────────────────┐
+│       Validation Middleware          │
+│   validate(dashboardQuerySchema)     │
+│  • startDate: optional ISO string    │
+│  • endDate: optional ISO string      │
+└────┬─────────────────────────────────┘
+     │ ✓ Valid
+     ▼
+┌──────────────────────────────────────┐
+│       Dashboard Controller           │
+│   dashboardController.getSummary()   │
+│   • Extract validated query params   │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│        Dashboard Service             │
+│   dashboardService.getSummary(query) │
+│   • Build date filter WHERE clause   │
+│   • Filter: deletedAt IS NULL        │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│         Prisma Client                │
+│   prisma.record.groupBy({            │
+│     by: ['type'],                    │
+│     where: { deletedAt: null, date },│
+│     _sum: { amount: true },          │
+│     _count: { id: true }             │
+│   })                                 │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│      Aggregation Logic               │
+│   • totalIncome = SUM(INCOME)        │
+│   • totalExpenses = SUM(EXPENSE)     │
+│   • netBalance = income - expenses   │
+│   • recordCount = income + expense   │
+│   • savingsRate = (net/income)*100   │
+│   • Convert Decimal → number         │
+└────┬─────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│        Response 200 OK               │
+│   {                                  │
+│     success: true,                   │
+│     data: {                          │
+│       totalIncome: 25000.00,         │
+│       totalExpenses: 8500.00,        │
+│       netBalance: 16500.00,          │
+│       recordCount: 45,               │
+│       incomeCount: 12,               │
+│       expenseCount: 33,              │
+│       savingsRate: "66.00"           │
+│     }                                │
+│   }                                  │
+└──────────────────────────────────────┘
+```
 
 ---
 
