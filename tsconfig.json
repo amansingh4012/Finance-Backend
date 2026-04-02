@@ -13,16 +13,8 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "moduleResolution": "node",
-    "baseUrl": "./src",
-    "paths": {
-      "@/*": ["./*"],
-      "@config/*": ["config/*"],
-      "@middlewares/*": ["middlewares/*"],
-      "@modules/*": ["modules/*"],
-      "@shared/*": ["shared/*"]
-    }
+    "moduleResolution": "node"
   },
-  "include": ["src/**/*", "prisma/seed.ts"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "tests"]
 }
