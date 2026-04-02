@@ -1,0 +1,92 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User roles enum
+enum Role {
+  VIEWER
+  ANALYST
+  ADMIN
+}
+
+// User status enum
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+// Financial record type enum
+enum RecordType {
+  INCOME
+  EXPENSE
+}
+
+// User model
+model User {
+  id          String      @id @default(uuid())
+  email       String      @unique
+  password    String
+  name        String
+  role        Role        @default(VIEWER)
+  status      UserStatus  @default(ACTIVE)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  deletedAt   DateTime?
+
+  // Self-referential relation for tracking who created the user
+  createdById String?
+  createdBy   User?       @relation("UserCreatedBy", fields: [createdById], references: [id])
+  createdUsers User[]     @relation("UserCreatedBy")
+
+  // Financial records owned by this user
+  records     Record[]
+
+  @@index([email])
+  @@index([role])
+  @@index([status])
+}
+
+// Financial Record model
+model Record {
+  id          String      @id @default(uuid())
+  amount      Decimal     @db.Decimal(15, 2)
+  type        RecordType
+  category    String
+  date        DateTime
+  description String?
+  
+  // Relation to user
+  userId      String
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  deletedAt   DateTime?
+
+  @@index([userId])
+  @@index([type])
+  @@index([category])
+  @@index([date])
+  @@index([userId, date])
+  @@index([type, category])
+}
+
+// Predefined categories (optional reference table)
+model Category {
+  id        String      @id @default(uuid())
+  name      String      @unique
+  type      RecordType
+  icon      String?
+  color     String?
+  createdAt DateTime    @default(now())
+
+  @@index([type])
+}
