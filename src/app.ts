@@ -30,6 +30,9 @@ const swaggerOptions = {
       },
     },
     servers: [
+      ...(config.env === 'production' && process.env.RENDER_EXTERNAL_URL
+        ? [{ url: process.env.RENDER_EXTERNAL_URL, description: 'Production server' }]
+        : []),
       {
         url: `http://localhost:${config.port}`,
         description: 'Development server',
@@ -113,7 +116,7 @@ const swaggerOptions = {
       { name: 'Dashboard', description: 'Dashboard and analytics endpoints' },
     ],
   },
-  apis: ['./src/modules/**/*.routes.ts'],
+  apis: [], // Routes documented inline via swaggerSpec below
 };
 
 const swaggerSpec = swaggerJsdoc(swaggerOptions);

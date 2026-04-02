@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
-import path from 'path';
 
-dotenv.config({ path: path.join(__dirname, '../../.env') });
+// Load .env file (not needed in production with env vars set)
+dotenv.config();
 
 export const config = {
   env: process.env.NODE_ENV || 'development',
