@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
+import jwt, { SignOptions } from 'jsonwebtoken';
 import { PrismaClient } from '@prisma/client';
 import { config } from '../../config';
 import { UnauthorizedError, ConflictError, BadRequestError } from '../../shared/errors';
@@ -11,14 +11,20 @@ const prisma = new PrismaClient();
 export class AuthService {
   // Generate JWT tokens
   private generateTokens(payload: ITokenPayload): IAuthTokens {
-    const accessToken = jwt.sign(payload, config.jwt.secret, {
-      expiresIn: config.jwt.expiresIn,
-    });
+    const accessTokenOptions: SignOptions = {
+      expiresIn: config.jwt.expiresIn as string,
+    };
+
+    const refreshTokenOptions: SignOptions = {
+      expiresIn: config.jwt.refreshExpiresIn as string,
+    };
+
+    const accessToken = jwt.sign(payload, config.jwt.secret, accessTokenOptions);
 
     const refreshToken = jwt.sign(
       { userId: payload.userId, type: 'refresh' },
       config.jwt.secret,
-      { expiresIn: config.jwt.refreshExpiresIn }
+      refreshTokenOptions
     );
 
     return { accessToken, refreshToken };
